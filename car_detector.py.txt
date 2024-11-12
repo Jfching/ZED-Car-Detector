@@ -107,8 +107,7 @@ def main():
         if frame is not None:
             augmented_frame = apply_augmentation(frame)
             boxes, confidences, class_ids = run_inference(
-                model, augmented_frame, conf_threshold=args.conf_thres, iou_threshold=args.iou_thres
-            )
+                model, augmented_frame, conf_threshold=args.conf_thres, iou_threshold=args.iou_thres)
             
             #opencv
             for box, confidence, class_id in zip(boxes, confidences, class_ids):
