@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+
+import torch
+import numpy as np
+import pyzed.sl as sl
+import argparse
+import cv2
+import random
+from ultralytics import YOLO
+import OpenGL.GL as gl
+import OpenGL.GLUT as glut
+global opengl_frame
+
+def load_yolov5_model(weights_path):
+    model = YOLO(weights_path)
+    return model
+
+# def preprocess_frame(frame, img_size=(640, 640)):
+#    resized_frame = cv2.resize(frame, img_size)
+#    input_data = torch.from_numpy(resized_frame).float() / 255.0
+#    input_data = input_data.permute(2, 0, 1).unsqueeze(0)
+#    return input_data
+
+def apply_augmentation(frame):
+    angle = random.uniform(-15, 15)
+    h, w = frame.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1)
+
+    frame = cv2.warpAffine(frame, rotation_matrix, (w, h))
+    scale = random.uniform(0.9, 1.1)
+
+    frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+    frame = cv2.resize(frame, (w, h))
+    return frame
+
+def filter_boxes(detections, conf_threshold=0.5, iou_threshold=0.8):
+    boxes = detections.xyxy[0].cpu().numpy()
+    confidences = detections.conf[0].cpu().numpy()
+    class_ids = detections.cls[0].cpu().numpy()
+
+    indices = confidences >= conf_threshold
+    boxes = boxes[indices]
+    confidences = confidences[indices]
+    class_ids = class_ids[indices]
+
+    indices = cv2.dnn.NMSBoxes(
+        boxes.tolist(), confidences.tolist(), conf_threshold, iou_threshold)
+
+    filtered_boxes = [boxes[i] for i in indices]
+    filtered_confidences = [confidences[i] for i in indices]
+    filtered_class_ids = [class_ids[i] for i in indices]
+
+    return filtered_boxes, filtered_confidences, filtered_class_ids
+
+
+
+def run_inference(model, frame, conf_threshold=0.5, iou_threshold=0.8):
+    results = model.predict(frame)
+    filtered_boxes, filtered_confidences, filtered_class_ids = filter_boxes(results[0], conf_threshold, iou_threshold)
+    return filtered_boxes, filtered_confidences, filtered_class_ids
+#    return filtered_boxes
+#    return filtered_confidences
+
+def capture_frame(zed):
+    runtime_parameters = sl.RuntimeParameters()
+    image = sl.Mat()
+    if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+        zed.retrieve_image(image, sl.VIEW.LEFT)
+        frame = image.get_data()
+        return frame
+    return None
+
+def display_opengl():
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+    gl.glLoadIdentity()
+    gl.glDrawPixels(opengl_frame.shape[1], opengl_frame.shape[0], gl.GL_BGR, gl.GL_UNSIGNED_BYTE, opengl_frame)
+    glut.glutSwapBuffers()
+
+def main():
+    global opengl_frame
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', type=str, required=True, help='Path to YOLOv5 weights file (e.g., yolov5s.pt)')
+    parser.add_argument('--img_size', type=int, default=640, help='Inference image size')
+    parser.add_argument('--conf_thres', type=float, default=0.4, help='Confidence threshold')
+    parser.add_argument('--iou_thres', type=float, default=0.5, help='IoU threshold for NMS')
+    args = parser.parse_args()
+
+    model = load_yolov5_model(args.weights)
+
+    zed = sl.Camera()
+    init_params = sl.InitParameters()
+    init_params.camera_resolution = sl.RESOLUTION.HD720
+    init_params.coordinate_units = sl.UNIT.METER
+    if zed.open(init_params) != sl.ERROR_CODE.SUCCESS:
+        print("Could not open the ZED camera")
+        exit(1)
+
+    #opengl
+    glut.glutInit()
+    glut.glutInitDisplayMode(glut.GLUT_RGB | glut.GLUT_DOUBLE | glut.GLUT_DEPTH)
+    glut.glutInitWindowSize(init_params.camera_resolution.width, init_params.camera_resolution.height)
+    glut.glutCreateWindow("YOLOv5 with OpenGL")
+    glut.glutDisplayFunc(display_opengl)
+
+    while True:
+        frame = capture_frame(zed)
+        if frame is not None:
+            augmented_frame = apply_augmentation(frame)
+            boxes, confidences, class_ids = run_inference(
+                model, augmented_frame, conf_threshold=args.conf_thres, iou_threshold=args.iou_thres
+            )
+            
+            #opencv
+            for box, confidence, class_id in zip(boxes, confidences, class_ids):
+                x_min, y_min, x_max, y_max = map(int, box)
+                cv2.rectangle(augmented_frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                label = f"ID: {int(class_id)}, Conf: {confidence:.2f}"
+                cv2.putText(augmented_frame, label, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            opengl_frame = augmented_frame
+            glut.glutPostRedisplay()
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    zed.close()
+
+if __name__ == '__main__':
+    main()
